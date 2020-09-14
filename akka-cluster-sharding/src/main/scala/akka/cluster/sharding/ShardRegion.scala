@@ -778,18 +778,21 @@ private[akka] class ShardRegion(
   }
 
   def receiveCommand(cmd: ShardRegionCommand): Unit = cmd match {
+
     case Retry =>
-      sendGracefulShutdownToCoordinator()
+      if (gracefulShutdownInProgress) {
+        sendGracefulShutdownToCoordinator()
+        tryCompleteGracefulShutdown()
+      } else {
+        if (shardBuffers.nonEmpty)
+          retryCount += 1
 
-      if (shardBuffers.nonEmpty)
-        retryCount += 1
-      if (coordinator.isEmpty)
-        register()
-      else {
-        requestShardBufferHomes()
+        if (coordinator.nonEmpty)
+          register()
+        else {
+          requestShardBufferHomes()
+        }
       }
-
-      tryCompleteGracefulShutdown()
 
     case RegisterRetry =>
       if (coordinator.isEmpty) {
@@ -861,7 +864,12 @@ private[akka] class ShardRegion(
         }
       }
 
-      tryCompleteGracefulShutdown()
+      if (gracefulShutdownInProgress) {
+        // did this shard get removed because the ShardRegion is shutting down?
+        // if so, gracefulShutdownInProgress will be true and we should try to speed-up the region shutdown.
+        // In other words, if this was the last shard, the region can stop for good right now
+        tryCompleteGracefulShutdown()
+      }
     }
   }
 
@@ -910,8 +918,8 @@ private[akka] class ShardRegion(
       case Failure(_) => Success(Left(shardId))
     }
 
-  private def tryCompleteGracefulShutdown() =
-    if (gracefulShutdownInProgress && shards.isEmpty && shardBuffers.isEmpty) {
+  private def tryCompleteGracefulShutdown(): Unit =
+    if (shards.isEmpty && shardBuffers.isEmpty) {
       context.stop(self) // all shards have been rebalanced, complete graceful shutdown
     }
 
@@ -1169,9 +1177,7 @@ private[akka] class ShardRegion(
   }
 
   def sendGracefulShutdownToCoordinator(): Unit = {
-    if (gracefulShutdownInProgress) {
-      log.debug("Sending graceful shutdown to {}", coordinatorSelection)
-      coordinatorSelection.foreach(_ ! GracefulShutdownReq(self))
-    }
+    log.debug("Sending graceful shutdown to {}", coordinatorSelection)
+    coordinatorSelection.foreach(_ ! GracefulShutdownReq(self))
   }
 }
